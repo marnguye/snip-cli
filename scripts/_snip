@@ -1,0 +1,27 @@
+#compdef snip
+
+_snip() {
+  local -a commands
+  commands=(
+    'add:Add new snippet'
+    'edit:Edit snippet command'
+    'find:Search snippets by query'
+    'remove:Remove snippet'
+    'run:Execute snippet by description'
+    'migrate:Migrate legacy Markdown snippets'
+    'storage:Inspect or select storage'
+  )
+
+  case "$words[2]" in
+    run|edit|remove|rm)
+      local -a descriptions
+      descriptions=(${(f)"$(snip _list-descriptions 2>/dev/null)"})
+      _describe 'snippet' descriptions
+      ;;
+    *)
+      _describe 'snip commands' commands
+      ;;
+  esac
+}
+
+_snip "$@"
