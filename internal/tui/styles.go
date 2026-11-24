@@ -3,12 +3,6 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 var (
-	itemStyle = lipgloss.NewStyle().PaddingLeft(2)
-
-	selectedItemStyle = lipgloss.NewStyle().
-				PaddingLeft(2).
-				Foreground(magenta)
-
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(magenta).

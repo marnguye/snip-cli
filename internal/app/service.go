@@ -18,9 +18,12 @@ import (
 
 type Item struct {
 	ID, Title, Description, Command, Group string
+	Tags                                   []string
 	Revision                               uint64
 	Legacy                                 bool
 }
+
+var ErrGroupNotFound = errors.New("snippet file not found")
 
 type StorageStatus struct {
 	Backend                state.Backend
@@ -118,7 +121,7 @@ func (service *Service) Group(ctx context.Context, group string) ([]Item, error)
 		}
 	}
 	if len(found) == 0 {
-		return nil, fmt.Errorf("snippet file %q not found", group)
+		return nil, fmt.Errorf("%w: %q", ErrGroupNotFound, group)
 	}
 	return found, nil
 }
@@ -139,6 +142,9 @@ func (service *Service) List(ctx context.Context) ([]Item, error) {
 }
 
 func (service *Service) Create(ctx context.Context, group, title, command string) (Item, error) {
+	if group == "" {
+		group = "default"
+	}
 	if service.Backend == state.Legacy {
 		if err := os.MkdirAll(service.LegacyDir, 0o700); err != nil {
 			return Item{}, err
@@ -160,9 +166,6 @@ func (service *Service) Create(ctx context.Context, group, title, command string
 			}
 		}
 		return Item{}, fmt.Errorf("created legacy snippet cannot be located")
-	}
-	if group == "" {
-		group = "default"
 	}
 	group = strings.TrimSuffix(group, ".md")
 	snippet, err := domain.New(title, command, time.Now())
@@ -296,5 +299,5 @@ func (service *Service) uniqueLegacy(item Item) error {
 	return nil
 }
 func fromDomain(snippet domain.Snippet) Item {
-	return Item{ID: snippet.ID, Title: snippet.Title, Description: snippet.Description, Command: snippet.Command, Group: snippet.Group, Revision: snippet.Revision}
+	return Item{ID: snippet.ID, Title: snippet.Title, Description: snippet.Description, Command: snippet.Command, Group: snippet.Group, Tags: snippet.Tags, Revision: snippet.Revision}
 }

@@ -1,27 +1,34 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/truncate"
+
 	"github.com/marnguye/snip-cli/internal/app"
 	"github.com/marnguye/snip-cli/internal/state"
 )
 
-type uiState int
+type mode int
 
 const (
-	stateList uiState = iota
-	stateForm
-	stateConfirm
+	modePicker mode = iota
+	modeForm
+	modeConfirm
+)
+
+const (
+	chromeLines = 7
+	itemLines   = 3
 )
 
 var (
@@ -52,88 +59,161 @@ var (
 	inactiveBorder = lipgloss.NewStyle().PaddingLeft(2)
 )
 
+type form struct {
+	desc, cmd               textinput.Model
+	focus                   int
+	edit                    bool
+	initialDesc, initialCmd string
+	discardWarned           bool
+}
+
 type Model struct {
-	list        list.Model
-	service     *app.Service
-	state       uiState
-	descInput   textinput.Model
-	cmdInput    textinput.Model
-	focusIndex  int
-	formIsEdit  bool
-	targetItem  item
-	targetIndex int
-	help        help.Model
-	errMsg      string
-	width       int
-	height      int
-	Selected    string
-	Execute     bool
+	service       *app.Service
+	group         string
+	entries       []entry
+	results       []int
+	scratch       []scored
+	query         textinput.Model
+	cursor        int
+	offset        int
+	mode          mode
+	form          form
+	target        app.Item
+	help          help.Model
+	err           string
+	width, height int
+	Selected      string
+	Execute       bool
 }
 
-func NewModel(items []list.Item, service *app.Service, filterQuery string) Model {
-	l := list.New(items, itemDelegate{}, 80, 20)
-	l.Title = ""
-	l.SetShowStatusBar(false)
-	l.SetShowHelp(false)
-	l.SetShowPagination(false)
-
-	l.KeyMap.CursorUp = key.NewBinding(key.WithKeys("up", "k"))
-	l.KeyMap.CursorDown = key.NewBinding(key.WithKeys("down", "j"))
-	l.KeyMap.Filter = key.NewBinding(key.WithKeys("/"))
-	l.KeyMap.ClearFilter = key.NewBinding(key.WithKeys("esc"))
-
-	if filterQuery != "" {
-		l.SetFilterText(filterQuery)
+func NewModel(service *app.Service, group, query string) (Model, error) {
+	m := Model{service: service, group: group, width: 80, height: 24}
+	items, err := m.fetch()
+	if err != nil {
+		return Model{}, err
 	}
+	m.entries = newEntries(items)
 
-	h := help.New()
-	h.ShowAll = true
+	m.query = textinput.New()
+	m.query.Prompt = "> "
+	m.query.Placeholder = "search snippets"
+	m.query.CharLimit = 200
+	m.query.Width = 60
+	m.query.SetValue(query)
+	m.query.Focus()
 
-	desc := textinput.New()
-	desc.Placeholder = "Description"
-	desc.CharLimit = 200
-	desc.Width = 40
+	m.form.desc = textinput.New()
+	m.form.desc.Placeholder = "Description"
+	m.form.desc.CharLimit = 200
+	m.form.desc.Width = 40
+	m.form.cmd = textinput.New()
+	m.form.cmd.Placeholder = "Command"
+	m.form.cmd.CharLimit = 500
+	m.form.cmd.Width = 40
 
-	cmdIn := textinput.New()
-	cmdIn.Placeholder = "Command"
-	cmdIn.CharLimit = 500
-	cmdIn.Width = 40
+	m.help = help.New()
+	m.help.Styles.ShortKey = footerKeyStyle
+	m.help.Styles.ShortDesc = footerStyle
+	m.help.Styles.ShortSeparator = footerStyle
+	m.help.Width = m.width - 4
 
-	return Model{list: l, service: service, descInput: desc, cmdInput: cmdIn, help: h}
+	m.refilter()
+	return m, nil
 }
 
-func (m Model) Init() tea.Cmd { return nil }
-
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if wsm, ok := msg.(tea.WindowSizeMsg); ok {
-		m.width, m.height = wsm.Width, wsm.Height
-		m.help.Width = wsm.Width
-		m.list.SetSize(wsm.Width-4, wsm.Height-4)
-		return m, nil
+func newEntries(items []app.Item) []entry {
+	entries := make([]entry, len(items))
+	for i, item := range items {
+		entries[i] = newEntry(item)
 	}
-
-	switch m.state {
-	case stateForm:
-		return m.updateForm(msg)
-	case stateConfirm:
-		return m.updateConfirm(msg)
-	default:
-		return m.updateList(msg)
-	}
+	return entries
 }
+
+func (m Model) fetch() ([]app.Item, error) {
+	if m.group != "" {
+		return m.service.Group(context.Background(), m.group)
+	}
+	return m.service.List(context.Background())
+}
+
+func (m *Model) reload(focusID string) error {
+	items, err := m.fetch()
+	if errors.Is(err, app.ErrGroupNotFound) {
+		items, err = nil, nil
+	}
+	if err != nil {
+		return err
+	}
+	m.entries = newEntries(items)
+	m.results, m.scratch = rank(m.entries, m.query.Value(), m.results, m.scratch)
+	if !m.focus(focusID) {
+		m.cursor = max(0, min(m.cursor, len(m.results)-1))
+	}
+	m.clampScroll()
+	return nil
+}
+
+func (m *Model) refilter() {
+	m.results, m.scratch = rank(m.entries, m.query.Value(), m.results, m.scratch)
+	m.cursor, m.offset = 0, 0
+}
+
+func (m *Model) focus(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i, index := range m.results {
+		if m.entries[index].item.ID == id {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) selected() (app.Item, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.results) {
+		return app.Item{}, false
+	}
+	return m.entries[m.results[m.cursor]].item, true
+}
+
+func (m Model) rows() int {
+	return max(1, (m.height-chromeLines)/itemLines)
+}
+
+func (m *Model) move(delta int) {
+	if len(m.results) == 0 {
+		return
+	}
+	m.cursor = max(0, min(m.cursor+delta, len(m.results)-1))
+	m.clampScroll()
+}
+
+func (m *Model) clampScroll() {
+	rows := m.rows()
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+rows {
+		m.offset = m.cursor - rows + 1
+	}
+	m.offset = max(0, min(m.offset, len(m.results)-rows))
+}
+
+func (m Model) Init() tea.Cmd { return textinput.Blink }
 
 func (m Model) View() string {
-	switch m.state {
-	case stateForm:
+	switch m.mode {
+	case modeForm:
 		return m.renderModal(m.formView())
-	case stateConfirm:
+	case modeConfirm:
 		return m.renderModal(m.confirmView())
-	default:
-		if len(m.list.Items()) == 0 {
-			return RenderEmptyState(m.width, m.height, m.emptyHint())
-		}
-		return m.listView()
 	}
+	if len(m.entries) == 0 {
+		return RenderEmptyState(m.width, m.height, m.emptyHint())
+	}
+	return m.pickerView()
 }
 
 func (m Model) emptyHint() emptyHint {
@@ -152,9 +232,9 @@ func (m Model) emptyHint() emptyHint {
 		desc: "Add your first snippet to get started.",
 		path: displayPath(filepath.Join(m.service.DataDir, "snippets")),
 		steps: []string{
-			"Press a to add a snippet",
+			"Press ctrl+n to add a snippet",
 			"Or run: snip add <group> ...",
-			"Press enter to copy, x to execute",
+			"Press enter to copy",
 		},
 	}
 }
@@ -168,66 +248,39 @@ func displayPath(path string) string {
 	return path
 }
 
-func (m Model) listView() string {
+func (m Model) pickerView() string {
 	var s strings.Builder
-	totalItems := len(m.list.VisibleItems())
-
+	contentWidth := max(10, m.width-4)
 	title := headerTitleStyle.Render("snip")
-	count := headerCountStyle.Render(fmt.Sprintf("%d snippets", totalItems))
-	filterMode := headerTitleStyle.Render("all")
-	if m.list.FilterState() == list.Filtering {
-		filterMode = headerTitleStyle.Render("searching")
+	count := headerCountStyle.Render(fmt.Sprintf("%d snippets", len(m.results)))
+	left := fmt.Sprintf("%s  •  %s ", title, count)
+	line := ""
+	if width := contentWidth - lipgloss.Width(left); width > 0 {
+		line = headerLineStyle.Render(strings.Repeat("─", width))
 	}
-	filterStr := headerCountStyle.Render("filter: ") + filterMode
-
-	headerWidth := m.width - 4
-	if headerWidth < 40 {
-		headerWidth = 60
+	s.WriteString(left + line + "\n")
+	s.WriteString(m.query.View() + "\n")
+	if m.err != "" {
+		s.WriteString(errorStyle.UnsetMarginTop().Render(truncate.StringWithTail(m.err, uint(contentWidth), "…")))
 	}
+	s.WriteString("\n")
 
-	leftHeader := fmt.Sprintf("%s  •  %s ", title, count)
-	rightHeader := fmt.Sprintf(" %s", filterStr)
-	lineWidth := headerWidth - lipgloss.Width(leftHeader) - lipgloss.Width(rightHeader)
-
-	var lineStr string
-	if lineWidth > 0 {
-		lineStr = headerLineStyle.Render(strings.Repeat("─", lineWidth))
+	if len(m.results) == 0 {
+		s.WriteString(inactiveTitleStyle.Render(truncate.StringWithTail(fmt.Sprintf("  No snippets match %q.", m.query.Value()), uint(contentWidth), "…")) + "\n")
 	}
-
-	s.WriteString(leftHeader + lineStr + rightHeader + "\n\n")
-
-	if totalItems == 0 {
-		s.WriteString(inactiveTitleStyle.Render("  No snippets found.") + "\n")
-	} else {
-		cursor := m.list.Index()
-		for i, rawItem := range m.list.VisibleItems() {
-			si := rawItem.(item)
-
-			var itemStr string
-			if i == cursor {
-				titleLine := activeTitleStyle.Render(si.snippet.Description)
-				descLine := activeDescStyle.Render(fmt.Sprintf("[%s] %s", si.category, si.snippet.Command))
-				itemStr = activeBorder.Render(fmt.Sprintf("%s\n%s", titleLine, descLine))
-			} else {
-				titleLine := inactiveTitleStyle.Render(si.snippet.Description)
-				descLine := inactiveDescStyle.Render(fmt.Sprintf("[%s] %s", si.category, si.snippet.Command))
-				itemStr = inactiveBorder.Render(fmt.Sprintf("%s\n%s", titleLine, descLine))
-			}
-			s.WriteString(itemStr + "\n\n")
+	textWidth := uint(max(1, contentWidth-3))
+	for i := m.offset; i < min(len(m.results), m.offset+m.rows()); i++ {
+		item := m.entries[m.results[i]].item
+		title := truncate.StringWithTail(item.Title, textWidth, "…")
+		detail := truncate.StringWithTail(fmt.Sprintf("[%s] %s", item.Group, strings.ReplaceAll(item.Command, "\n", " ")), textWidth, "…")
+		if i == m.cursor {
+			s.WriteString(activeBorder.Render(activeTitleStyle.Render(title)+"\n"+activeDescStyle.Render(detail)) + "\n\n")
+		} else {
+			s.WriteString(inactiveBorder.Render(inactiveTitleStyle.Render(title)+"\n"+inactiveDescStyle.Render(detail)) + "\n\n")
 		}
 	}
-
-	s.WriteString(headerLineStyle.Render(strings.Repeat("─", headerWidth)) + "\n")
-
-	nav := fmt.Sprintf("%s navigate", footerKeyStyle.Render("↑/↓"))
-	run := fmt.Sprintf("%s run", footerKeyStyle.Render("enter"))
-	execute := fmt.Sprintf("%s execute", footerKeyStyle.Render("x"))
-	filt := fmt.Sprintf("%s filter", footerKeyStyle.Render("/"))
-	quit := fmt.Sprintf("%s quit", footerKeyStyle.Render("ctrl+c"))
-
-	footer := fmt.Sprintf("%-20s | %-16s | %-16s | %-16s | %s", nav, run, execute, filt, quit)
-	s.WriteString(footerStyle.Render(footer))
-
+	s.WriteString(headerLineStyle.Render(strings.Repeat("─", contentWidth)) + "\n")
+	s.WriteString(m.help.View(keys.pickerHelp()))
 	return appStyle.Render(s.String())
 }
 
@@ -241,7 +294,7 @@ func (m Model) renderModal(content string) string {
 
 func (m Model) formView() string {
 	title := "Add Snippet"
-	if m.formIsEdit {
+	if m.form.edit {
 		title = "Edit Snippet"
 	}
 
@@ -251,24 +304,24 @@ func (m Model) formView() string {
 
 	b.WriteString(fieldLabelStyle.Render("Description"))
 	b.WriteString("\n")
-	if m.formIsEdit {
-		b.WriteString(m.targetItem.snippet.Description)
+	if m.form.edit {
+		b.WriteString(m.target.Title)
 	} else {
-		b.WriteString(m.descInput.View())
+		b.WriteString(m.form.desc.View())
 	}
 	b.WriteString("\n\n")
 
 	b.WriteString(fieldLabelStyle.Render("Command"))
 	b.WriteString("\n")
-	b.WriteString(m.cmdInput.View())
+	b.WriteString(m.form.cmd.View())
 
-	if m.errMsg != "" {
+	if m.err != "" {
 		b.WriteString("\n")
-		b.WriteString(errorStyle.Render(m.errMsg))
+		b.WriteString(errorStyle.Render(m.err))
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(m.help.View(GetKeys(m.state)))
+	b.WriteString(m.help.View(keys.formHelp()))
 
 	return b.String()
 }
@@ -278,16 +331,16 @@ func (m Model) confirmView() string {
 	b.WriteString(modalTitleStyle.Render("Delete Snippet"))
 	b.WriteString("\n")
 	b.WriteString("Delete ")
-	b.WriteString(dangerStyle.Render(m.targetItem.snippet.Description))
+	b.WriteString(dangerStyle.Render(m.target.Title))
 	b.WriteString("?")
 
-	if m.errMsg != "" {
+	if m.err != "" {
 		b.WriteString("\n")
-		b.WriteString(errorStyle.Render(m.errMsg))
+		b.WriteString(errorStyle.Render(m.err))
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(m.help.View(GetKeys(m.state)))
+	b.WriteString(m.help.View(keys.confirmHelp()))
 
 	return b.String()
 }

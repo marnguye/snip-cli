@@ -27,10 +27,19 @@ make build
 | `snip remove <file.md> <description>`         | Remove a snippet                          |
 | `snip migrate [--dry-run]`                    | Migrate Markdown snippets to TOML storage |
 | `snip storage status`                         | Show the active storage backend           |
-| `snip --version` | Print the version |
+| `snip --version`                              | Print the version                         |
 | `snip storage use <toml\|legacy> [--confirm]` | Select the storage backend                |
 
-Picker keys: `enter` copy, `x` execute, `a` add, `e` edit, `d` delete, `/` filter, `q` quit.
+The picker opens with search focused. Type to filter by title, command, group and tags; results are ranked by relevance.
+
+| Key                                | Action                                   |
+| ---------------------------------- | ---------------------------------------- |
+| `up` / `down`, `ctrl+k` / `ctrl+j` | Move selection                           |
+| `enter`                            | Copy selected command                    |
+| `ctrl+r`                           | Run selected command                     |
+| `ctrl+n` / `ctrl+e` / `ctrl+d`     | Add / edit / delete                      |
+| `esc`                              | Clear query, then quit (cancel in forms) |
+| `ctrl+c`                           | Quit                                     |
 
 Commands may contain `<placeholder>` tokens; values are prompted for before copy or execution.
 Values are substituted verbatim into a `sh -c` command line without quoting, so a value such as `x; other-command` runs both commands.

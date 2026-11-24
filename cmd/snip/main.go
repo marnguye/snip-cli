@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/marnguye/snip-cli/internal/app"
 	"github.com/marnguye/snip-cli/internal/cli"
@@ -17,7 +15,7 @@ import (
 	"github.com/marnguye/snip-cli/internal/tui"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -73,22 +71,11 @@ func run(args []string) error {
 		return nil
 	}
 
-	var stored []app.Item
-	if filename != "" {
-		stored, err = service.Group(context.Background(), filename)
-	} else {
-		stored, err = service.List(context.Background())
-	}
+	model, err := tui.NewModel(service, filename, filterQuery)
 	if err != nil {
 		return err
 	}
-	var items []list.Item
-	for _, snippet := range stored {
-		items = append(items, tui.NewItem(snippet))
-	}
-
-	p := tea.NewProgram(tui.NewModel(items, service, filterQuery), tea.WithAltScreen())
-	m, err := p.Run()
+	m, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
 	if err != nil {
 		return err
 	}
@@ -106,10 +93,18 @@ func run(args []string) error {
 		if finalModel.Execute {
 			return cli.RunShell(finalCommand)
 		}
-		if err := clipboard.WriteAll(finalCommand); err != nil {
-			return fmt.Errorf("copy command: %w", err)
-		}
-		fmt.Printf("✓ Copied: %s\n", finalCommand)
+		return copyCommand(finalCommand)
 	}
+	return nil
+}
+
+var writeClipboard = clipboard.WriteAll
+
+func copyCommand(command string) error {
+	if err := writeClipboard(command); err != nil {
+		fmt.Println(command)
+		return fmt.Errorf("clipboard unavailable (%w); command printed above, or run it with ctrl+r", err)
+	}
+	fmt.Printf("✓ Copied: %s\n", command)
 	return nil
 }

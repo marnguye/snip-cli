@@ -137,11 +137,8 @@ func emptyStackedContent(width int, hint emptyHint) string {
 
 func emptyGlobalFooter(width int) string {
 	items := []string{
-		emptyFooterKeyStyle.Render("a") + emptyFooterStyle.Render(" new"),
-		emptyFooterKeyStyle.Render("enter") + emptyFooterStyle.Render(" copy"),
-		emptyFooterKeyStyle.Render("x") + emptyFooterStyle.Render(" execute"),
-		emptyFooterKeyStyle.Render("/") + emptyFooterStyle.Render(" filter"),
-		emptyFooterKeyStyle.Render("q") + emptyFooterStyle.Render(" quit"),
+		emptyFooterKeyStyle.Render("ctrl+n") + emptyFooterStyle.Render(" new"),
+		emptyFooterKeyStyle.Render("esc") + emptyFooterStyle.Render(" quit"),
 	}
 	line := wrapItems(items, emptyFooterStyle.Render("    •    "), width)
 	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(line)

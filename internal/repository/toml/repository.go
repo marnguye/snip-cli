@@ -132,7 +132,12 @@ func (repository *Repository) List(ctx context.Context) ([]domain.Snippet, error
 		}
 		snippets = append(snippets, snippet)
 	}
-	sort.Slice(snippets, func(i, j int) bool { return snippets[i].ID < snippets[j].ID })
+	sort.Slice(snippets, func(i, j int) bool {
+		if !snippets[i].CreatedAt.Equal(snippets[j].CreatedAt) {
+			return snippets[i].CreatedAt.Before(snippets[j].CreatedAt)
+		}
+		return snippets[i].ID < snippets[j].ID
+	})
 	return snippets, nil
 }
 
